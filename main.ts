@@ -37,15 +37,15 @@
  * 
  * Icons used in the game:
  * 
- * Pairing: IconNames.Ghost,7
+ * Pairing: IconNames.Ghost
  * 
- * Paired: IconNames.Happy,
+ * Paired: IconNames.Happy
  * 
- * Dead: IconNames.Skull,
+ * Dead: IconNames.Skull
  * 
- * Sick: IconNames.Sad,
+ * Sick: IconNames.Sad
  * 
- * Incubating: IconNames.Confused,
+ * Incubating: IconNames.Confused
  * 
  * Healthy: IconNames.Happy
  */
@@ -68,6 +68,7 @@ function gameFace () {
             else
                 basic.showIcon(paired ? GameIcons.Paired : GameIcons.Pairing, 1);
             break;
+        case GameState.Infecting:
         case GameState.Running:
             switch (health) {
                 case HealthState.Dead:
@@ -115,6 +116,82 @@ function gameFace () {
             break;
     }
 }
+radio.onReceivedBuffer(function (receivedBuffer) {
+    const incomingMessage = new Message(receivedBuffer);
+signal = radio.receivedPacket(RadioPacketProperty.SignalStrength)
+    if (master) {
+        switch (incomingMessage.kind) {
+            case MessageKind.PairRequest:
+                // register player
+                let n = players.length;
+                player(incomingMessage.fromSerialNumber);
+                // show player number if changed
+                if (n != players.length) {
+                    basic.showNumber(players.length);
+                }
+                break;
+            case MessageKind.HealthValue:
+                let s = player(incomingMessage.fromSerialNumber);
+                s.health = incomingMessage.value;
+                // check if all infected
+                if (allDead())
+                    gameOver();
+                break;
+        }
+    } else {
+        switch (incomingMessage.kind) {
+            case MessageKind.GameState:
+                // update game state
+                state = incomingMessage.value as GameState;
+                break;
+            case MessageKind.InitialInfect:
+                if (infectedBy < 0 &&
+                    incomingMessage.toSerialNumber == control.deviceSerialNumber()) {
+                    // infected by master
+                    infectedBy = 0; // infected my master
+                    infectedTime = input.runningTime();
+                    health = HealthState.Incubating;
+                    serial.writeLine(`infected ${control.deviceSerialNumber()}`);
+                }
+                break;
+            case MessageKind.HealthSet:
+                if (incomingMessage.toSerialNumber == control.deviceSerialNumber()) {
+                    const newHealth = incomingMessage.value;
+                    if (health < newHealth) {
+                        health = newHealth;
+                    }
+                }
+                break;
+            case MessageKind.PairConfirmation:
+                if (!paired && state == GameState.Pairing &&
+                    incomingMessage.toSerialNumber == control.deviceSerialNumber()) {
+                    // paired!
+                    serial.writeLine(`player paired ==> ${control.deviceSerialNumber()}`)
+                    playerIcon = incomingMessage.value;
+                    paired = true;
+                }
+                break;
+            case MessageKind.TransmitVirus:
+                if (state == GameState.Running) {
+                    if (health == HealthState.Healthy) {
+                        serial.writeLine(`signal: ${signal}`);
+                        if (signal > RSSI &&
+                            Math.randomRange(0, 100) > TRANSMISSIONPROB) {
+                            infectedBy = incomingMessage.value;
+                            infectedTime = input.runningTime();
+                            health = HealthState.Incubating;
+                        }
+                    }
+                }
+                break;
+            case MessageKind.HealthValue:
+                if (health != HealthState.Dead && signal > RSSI) {
+                    game.addScore(1);
+                }
+                break;
+        }
+    }
+})
 function gameOver () {
     state = GameState.Over;
 if (patientZero) {
@@ -135,14 +212,9 @@ serial.writeLine("registered as master")
         return;
     }
     if (state == GameState.Pairing) {
-        patientZero = players[Math.randomRange(0, players.length)]
-        while (patientZero.health == HealthState.Healthy) {
-            radio.sendValue("infect", patientZero.id)
-            basic.pause(100)
-        }
-        state = GameState.Running;
+        patientZero = players[Math.randomRange(0, players.length - 1)]
+        state = GameState.Infecting;
 serial.writeLine("" + (`game started ${players.length} players`))
-        basic.showIcon(GameIcons.Dead);
     } else if (state == GameState.Running) {
         gameOver()
     }
@@ -163,6 +235,7 @@ players.push(q)
     return q
 }
 let master = false
+let signal = 0
 let infectedTime = 0
 let paired = false
 let players: Player[] = []
@@ -177,6 +250,7 @@ let TRANSMISSIONPROB = 40
 enum GameState {
     Stopped,
     Pairing,
+    Infecting,
     Running,
     Over
 }
@@ -186,6 +260,15 @@ enum HealthState {
     Sick,
     Dead
 }
+enum MessageKind {
+    PairRequest,
+    PairConfirmation,
+    HealthSet,
+    HealthValue,
+    InitialInfect,
+    TransmitVirus,
+    GameState
+}
 const GameIcons = {
     Pairing: IconNames.Ghost,
     Paired: IconNames.Happy,
@@ -193,6 +276,51 @@ const GameIcons = {
     Sick: IconNames.Sad,
     Incubating: IconNames.Confused,
     Healthy: IconNames.Happy
+}
+class Message {
+
+    private _data: Buffer;
+
+    constructor(input?: Buffer) {
+        this._data = input || control.createBuffer(13);
+    }
+
+    get kind(): number {
+        return this._data.getNumber(NumberFormat.Int8LE, 0);
+    }
+
+    set kind(x: number) {
+        this._data.setNumber(NumberFormat.Int8LE, 0, x);
+    }
+
+    get fromSerialNumber(): number {
+        return this._data.getNumber(NumberFormat.Int32LE, 1);
+    }
+
+    set fromSerialNumber(x: number) {
+        this._data.setNumber(NumberFormat.Int32LE, 1, x);
+    }
+
+    get value(): number {
+        return this._data.getNumber(NumberFormat.Int32LE, 5);
+    }
+
+    set value(x: number) {
+        this._data.setNumber(NumberFormat.Int32LE, 5, x);
+    }
+
+    get toSerialNumber(): number {
+        return this._data.getNumber(NumberFormat.Int32LE, 9);
+    }
+
+    set toSerialNumber(x: number) {
+        this._data.setNumber(NumberFormat.Int32LE, 9, x);
+    }
+
+    send() {
+        radio.sendBuffer(this._data);
+        basic.pause(250);
+    }
 }
 let playerIcons = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 class Player {
@@ -212,23 +340,44 @@ let infectedBy = -1
 let playerIcon = -1
 let health = HealthState.Healthy;
 radio.setGroup(42)
-radio.setTransmitSerialNumber(true)
 basic.showIcon(GameIcons.Pairing)
 basic.forever(function () {
-    if (master) {
+    let message: Message;
+if (master) {
         switch (state) {
             case GameState.Pairing:
                 // tell each player they are registered
-                for (const u of players) {
-                    radio.sendValue("paired", u.id);
-                    radio.sendValue("i" + u.id, u.icon);
+                for (const t of players) {
+                    message = new Message();
+                    message.kind = MessageKind.PairConfirmation;
+                    message.value = t.icon;
+                    message.toSerialNumber = t.id;
+                    message.send();
                 }
                 serial.writeLine(`pairing ${players.length} players`);
                 basic.pause(500);
                 break;
+            case GameState.Infecting:
+                if (patientZero.health == HealthState.Healthy) {
+                    message = new Message();
+                    message.kind = MessageKind.InitialInfect;
+                    message.toSerialNumber = patientZero.id;
+                    message.send();
+                    basic.pause(100);
+                } else {
+                    serial.writeLine(`patient ${patientZero.id} infected`);
+                    // show startup
+                    basic.showIcon(GameIcons.Dead);
+                    state = GameState.Running;
+                }
+                break;
             case GameState.Running:
-                for (const v of players) {
-                    radio.sendValue("h" + v.id, v.health);
+                for (const u of players) {
+                    message = new Message();
+                    message.kind = MessageKind.HealthSet;
+                    message.value = u.health;
+                    message.toSerialNumber = u.id;
+                    message.send();
                 }
                 break;
             case GameState.Over:
@@ -236,15 +385,33 @@ basic.forever(function () {
                     patientZero.show();
                 break;
         }
-radio.sendValue("state", state)
+message = new Message()
+message.kind = MessageKind.GameState;
+message.value = state;
+message.send();
     } else {
         switch (state) {
             case GameState.Pairing:
                 // broadcast player id
-                if (playerIcon < 0)
-                    radio.sendValue("pair", control.deviceSerialNumber());
-                else if (infectedBy > -1)
-                    radio.sendValue("health", health);
+                if (playerIcon < 0) {
+                    message = new Message();
+                    message.kind = MessageKind.PairRequest;
+                    message.fromSerialNumber = control.deviceSerialNumber();
+                    message.send();
+                } else if (infectedBy > -1) {
+                    message = new Message();
+                    message.kind = MessageKind.HealthValue;
+                    message.fromSerialNumber = control.deviceSerialNumber();
+                    message.value = health;
+                    message.send();
+                }
+                break;
+            case GameState.Infecting:
+                message = new Message();
+                message.kind = MessageKind.HealthValue;
+                message.fromSerialNumber = control.deviceSerialNumber();
+                message.value = health;
+                message.send();
                 break;
             case GameState.Running:
                 // update health status
@@ -253,9 +420,18 @@ radio.sendValue("state", state)
                 else if (health != HealthState.Healthy && input.runningTime() - infectedTime > INCUBATION)
                     health = HealthState.Sick;
                 // transmit disease
-                if (health == HealthState.Incubating || health == HealthState.Sick)
-                    radio.sendValue("transmit", playerIcon);
-                radio.sendValue("health", health);
+                if (health == HealthState.Incubating || health == HealthState.Sick) {
+                    message = new Message();
+                    message.kind = MessageKind.TransmitVirus;
+                    message.fromSerialNumber = control.deviceSerialNumber();
+                    message.value = playerIcon;
+                    message.send();
+                }
+                message = new Message();
+                message.kind = MessageKind.HealthValue;
+                message.fromSerialNumber = control.deviceSerialNumber();
+                message.value = health;
+                message.send();
                 break;
         }
 gameFace()
